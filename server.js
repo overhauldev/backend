@@ -2,9 +2,12 @@ const express = require("express");
 const sqlite3 = require("sqlite3").verbose();
 const cors = require("cors");
 const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+require("dotenv").config();
 
 const app = express();
 const PORT = 5000;
+const SECRET_KEY = process.env.SECRET_KEY;
 
 app.use(cors());
 app.use(express.json());
@@ -13,19 +16,22 @@ const path = require("path");
 const dbPath = path.join(__dirname, "backend.db");
 const db = new sqlite3.Database(dbPath, (err) => {
 	if (err) {
-		console.error(err.message);
+		console.error("Database connection error:", err.message);
 	} else {
 		console.log("Connected to the SQLite database.");
 	}
 });
 
+// Root route
 app.get("/", (req, res) => {
+	console.log("Root route accessed");
 	res.send("Development server is running!");
 });
 
 // Create a user
 app.post("/register", async (req, res) => {
 	const { username, email, password } = req.body;
+	console.log("Register endpoint hit with data:", { username, email });
 
 	try {
 		// Hash the password
@@ -39,88 +45,118 @@ app.post("/register", async (req, res) => {
 			function (err) {
 				if (err) {
 					if (err.code === "SQLITE_CONSTRAINT") {
+						console.error(
+							"Registration error: Username or email already exists"
+						);
 						res.status(400).json({ error: "Username or email already exists" });
 					} else {
+						console.error("Database error during registration:", err.message);
 						res.status(500).json({ error: "Database error" });
 					}
 					return;
 				}
+				console.log("User registered successfully:", { username, email });
 				res.status(201).json({ message: "User registered successfully" });
 			}
 		);
 	} catch (error) {
+		console.error("Server error during registration:", error.message);
 		res.status(500).json({ error: "Server error" });
 	}
 });
 
+// Middleware to verify JWT token
+const verifyToken = (req, res, next) => {
+	const token = req.headers["authorization"];
+	if (!token) {
+		console.warn("Token not provided in request");
+		return res.status(403).json({ error: "No token provided" });
+	}
+
+	console.log("Token received:", token);
+
+	jwt.verify(token, SECRET_KEY, (err, decoded) => {
+		if (err) {
+			console.error("Token verification failed:", err.message);
+			return res.status(401).json({ error: "Unauthorized" });
+		}
+		console.log("Token verified successfully. Decoded payload:", decoded);
+		req.userId = decoded.userId; // Attach userId to the request object
+		next();
+	});
+};
+
 // Login endpoint
 app.post("/login", (req, res) => {
 	const { identifier, password } = req.body;
-	console.log(
-		"Received login request with identifier:",
-		identifier,
-		"and password:",
-		password
-	);
+	console.log("Login endpoint hit with identifier:", identifier);
 
 	db.get(
 		"SELECT * FROM users WHERE email = ? OR username = ?",
 		[identifier, identifier],
 		(err, row) => {
 			if (err) {
-				console.error("Database error:", err);
+				console.error("Database error during login:", err.message);
 				res.status(500).json({ error: "Internal server error" });
 				return;
 			}
 			if (!row) {
-				console.log("No user found with identifier:", identifier);
+				console.warn("Invalid credentials for identifier:", identifier);
 				res.status(401).json({ error: "Invalid credentials" });
 				return;
 			}
 
-			console.log("User found:", row);
-
 			// Check if the password matches the stored hash
 			bcrypt.compare(password, row.password_hash, (err, result) => {
 				if (err) {
-					console.error("Error comparing passwords:", err);
+					console.error("Error comparing passwords:", err.message);
 					res.status(500).json({ error: "Internal server error" });
 					return;
 				}
 				if (!result) {
-					console.log("Password does not match for user:", identifier);
+					console.warn("Password mismatch for identifier:", identifier);
 					res.status(401).json({ error: "Invalid credentials" });
 					return;
 				}
-				console.log("Login successful for user:", identifier);
-				res.status(200).json({ message: "Login successful" });
+
+				// Generate JWT token
+				const token = jwt.sign({ userId: row.user_id }, SECRET_KEY, {
+					expiresIn: "1h", // Token expires in 1 hour
+				});
+				console.log("Token generated for user:", row.user_id);
+
+				res.cookie("token", token, {
+					httpOnly: true,
+					secure: true, // Use secure cookies in production
+					sameSite: "strict",
+				});
+				res.status(200).json({ message: "Login successful", token });
 			});
 		}
 	);
 });
 
-// GET endpoint to retrieve all products
-app.get("/products", (req, res) => {
-	db.all("SELECT * FROM products", [], (err, rows) => {
-		if (err) {
-			res.status(500).json({ error: err.message });
-			return;
-		}
-		res.json(rows);
-	});
-});
-
 // POST endpoint to add a new product
-app.post("/products", (req, res) => {
+app.post("/products", verifyToken, (req, res) => {
 	const { name, description, price, category, image_url } = req.body;
+	console.log("Add product endpoint hit by user:", req.userId, "with data:", {
+		name,
+		description,
+		price,
+		category,
+		image_url,
+	});
+
 	db.run(
 		"INSERT INTO products (name, description, price, category, image_url) VALUES (?, ?, ?, ?, ?)",
 		[name, description, price, category, image_url],
 		function (err) {
 			if (err) {
+				console.error("Error adding product:", err.message);
 				res.status(500).json({ error: err.message });
 				return;
 			}
+			console.log("Product added successfully with ID:", this.lastID);
 			res.json({
 				id: this.lastID,
 				name,
@@ -133,6 +169,20 @@ app.post("/products", (req, res) => {
 	);
 });
 
+// Logout endpoint
+app.post("/logout", (req, res) => {
+	console.log("Logout endpoint hit");
+	res.clearCookie("token");
+	res.status(200).json({ message: "Logged out successfully" });
+});
+
+// Protected route example
+app.get("/dashboard", verifyToken, (req, res) => {
+	console.log("Dashboard accessed by user:", req.userId);
+	res.json({ message: "Welcome to the dashboard", userId: req.userId });
+});
+
+// Start the server
 app.listen(PORT, () => {
 	console.log(`Server running on http://localhost:${PORT}`);
 });
