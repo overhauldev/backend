@@ -176,10 +176,54 @@ app.post("/logout", (req, res) => {
 	res.status(200).json({ message: "Logged out successfully" });
 });
 
-// Protected route example
+// Dashboard route to fetch user data
 app.get("/dashboard", verifyToken, (req, res) => {
-	console.log("Dashboard accessed by user:", req.userId);
-	res.json({ message: "Welcome to the dashboard", userId: req.userId });
+	const userId = req.userId; // Extract user ID from the verified token
+	console.log("Dashboard accessed by user:", userId);
+
+	// Queries to fetch user details and related data
+	const userQuery = `SELECT user_id, username, email FROM users WHERE user_id = ?`;
+	const carbonCalculationsQuery = `SELECT * FROM carbon_calculations WHERE user_id = ?`;
+	const energyCalculationsQuery = `SELECT * FROM energy_calculations WHERE user_id = ?`;
+
+	// Execute queries and combine results
+	db.get(userQuery, [userId], (err, user) => {
+		if (err) {
+			console.error("Error fetching user details:", err.message);
+			return res.status(500).json({ error: "Database error" });
+		}
+
+		if (!user) {
+			console.warn("User not found for ID:", userId);
+			return res.status(404).json({ error: "User not found" });
+		}
+
+		// Fetch carbon calculations
+		db.all(carbonCalculationsQuery, [userId], (err, carbonCalculations) => {
+			if (err) {
+				console.error("Error fetching carbon calculations:", err.message);
+				return res.status(500).json({ error: "Database error" });
+			}
+
+			// Fetch energy calculations
+			db.all(energyCalculationsQuery, [userId], (err, energyCalculations) => {
+				if (err) {
+					console.error("Error fetching energy calculations:", err.message);
+					return res.status(500).json({ error: "Database error" });
+				}
+
+				// Combine all data into a single response
+				const responseData = {
+					user,
+					carbonCalculations,
+					energyCalculations,
+				};
+
+				console.log("Dashboard data fetched successfully for user:", userId);
+				res.json(responseData);
+			});
+		});
+	});
 });
 
 // Start the server
